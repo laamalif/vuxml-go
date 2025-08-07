@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/beevik/etree"
 	"github.com/fatih/color"
 	"github.com/hashicorp/go-version"
 	"github.com/jaytaylor/html2text"
@@ -21,69 +21,33 @@ import (
 
 const (
 	LATEST_VUXML = "https://www.vuxml.org/freebsd/vuln.xml.xz"
-	VERSION      = "1.1.0"
+	VERSION      = "1.3.0"
 )
 
-// VuXML represents the top-level structure of the vulnerability document.
-type VuXML struct {
-	XMLName xml.Name `xml:"vuxml"`
-	Vulns   []Vuln   `xml:"vuln"`
-}
-
-// Vuln represents a single vulnerability entry.
+// Vuln represents a single vulnerability entry, parsed from etree.
 type Vuln struct {
-	XMLName     xml.Name   `xml:"vuln"`
-	Vid         string     `xml:"vid,attr"`
-	Topic       string     `xml:"topic"`
-	Description string     `xml:",innerxml"`
-	References  References `xml:"references"`
-	Affects     Affects    `xml:"affects"`
-	Dates       Dates      `xml:"dates"`
-	Cancelled   *struct{}  `xml:"cancelled"`
-}
-
-// References contains a list of vulnerability references.
-type References struct {
-	Refs []GenericRef `xml:",any"`
-}
-
-// GenericRef captures a generic reference with a dynamic tag.
-type GenericRef struct {
-	XMLName xml.Name
-	Value   string `xml:",chardata"`
-}
-
-// Affects holds all the affected packages for a vulnerability.
-type Affects struct {
-	Packages []Package `xml:"package"`
-}
-
-// Package represents a single affected package.
-type Package struct {
-	Name  string  `xml:"name"`
-	Range []Range `xml:"range"`
-}
-
-// Range specifies the version range of an affected package.
-type Range struct {
-	Lt string `xml:"lt"`
-	Le string `xml:"le"`
-	Eq string `xml:"eq"`
-	Ge string `xml:"ge"`
-	Gt string `xml:"gt"`
-}
-
-// Dates contains the various dates associated with a vulnerability.
-type Dates struct {
-	Discovery string `xml:"discovery"`
-	Entry     string `xml:"entry"`
-	Modified  string `xml:"modified"`
-}
-
-// stripDTD removes the DOCTYPE declaration from the XML data.
-func stripDTD(data []byte) []byte {
-	re := regexp.MustCompile(`(?s)<!DOCTYPE.*?>`)
-	return re.ReplaceAll(data, nil)
+	Vid         string
+	Topic       string
+	Description string
+	References  []struct {
+		Source string
+		Value  string
+	}
+	Affects []struct {
+		Name  string
+		Range []struct {
+			Lt string
+			Le string
+			Eq string
+			Ge string
+			Gt string
+		}
+	}
+	Dates struct {
+		Discovery string
+		Entry     string
+		Modified  string
+	}
 }
 
 // isValidDate checks if a string is a valid date in YYYY, YYYY-MM, or YYYY-MM-DD format.
@@ -119,9 +83,9 @@ func printVuln(vuln Vuln, showDescription bool) {
 	fmt.Printf("%s %s\n", bold("Vulnerability ID:"), vuln.Vid)
 	fmt.Printf("  %s %s\n", bold("Topic:"), redBg(vuln.Topic))
 
-	if len(vuln.Affects.Packages) > 0 {
+	if len(vuln.Affects) > 0 {
 		fmt.Printf("  %s\n", bold("Affects:"))
-		for _, pkg := range vuln.Affects.Packages {
+		for _, pkg := range vuln.Affects {
 			fmt.Printf("    %s:\n", bold(red(pkg.Name)))
 			for _, r := range pkg.Range {
 				var conditions []string
@@ -157,14 +121,14 @@ func printVuln(vuln Vuln, showDescription bool) {
 		}
 	}
 
-	if len(vuln.References.Refs) > 0 {
+	if len(vuln.References) > 0 {
 		fmt.Printf("  %s\n", bold("References:"))
-		for _, ref := range vuln.References.Refs {
-			fmt.Printf("    %s: %s\n", ref.XMLName.Local, ref.Value)
+		for _, ref := range vuln.References {
+			fmt.Printf("    %s: %s\n", ref.Source, ref.Value)
 		}
 	}
 
-	if (vuln.Dates != Dates{}) {
+	if (vuln.Dates != struct{ Discovery, Entry, Modified string }{}) {
 		if vuln.Dates.Discovery != "" {
 			fmt.Printf("  %s %s\n", bold("Discovery date:"), vuln.Dates.Discovery)
 		}
@@ -234,9 +198,6 @@ func downloadVuXML() (string, error) {
 		return "", fmt.Errorf("failed to read XML data: %w", err)
 	}
 
-	// Strip DTD before writing to file
-	xmlData = stripDTD(xmlData)
-
 	err = os.WriteFile(filePath, xmlData, 0644)
 	if err != nil {
 		return "", fmt.Errorf("failed to write cache file: %w", err)
@@ -273,42 +234,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *latest > 0 {
-		xmlPath, err := downloadVuXML()
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		xmlData, err := os.ReadFile(xmlPath)
-		if err != nil {
-			log.Fatalf("Failed to read XML data from cache: %v", err)
-		}
-
-		var vuxml VuXML
-		err = xml.Unmarshal(xmlData, &vuxml)
-		if err != nil {
-			log.Fatalf("Failed to parse XML: %v", err)
-		}
-
-		// Sort vulnerabilities by entry date
-		sort.Slice(vuxml.Vulns, func(i, j int) bool {
-			return vuxml.Vulns[i].Dates.Entry > vuxml.Vulns[j].Dates.Entry
-		})
-
-		fmt.Println("Latest Vulnerabilities:")
-		for i := 0; i < *latest && i < len(vuxml.Vulns); i++ {
-			vuln := vuxml.Vulns[i]
-			fmt.Printf("%s  %s\n", vuln.Dates.Entry, vuln.Topic)
-		}
-		os.Exit(0)
-	}
-
 	// 1. Get the VuXML file (from cache or download)
 	xmlPath, err := downloadVuXML()
 	if err != nil {
 		log.Fatalf("Error: %v", err)
 	}
-
 
 	// 2. Read the XML data
 	xmlData, err := os.ReadFile(xmlPath)
@@ -316,20 +246,117 @@ func main() {
 		log.Fatalf("Failed to read XML data from cache: %v", err)
 	}
 
-	// 3. Parse the XML
-
-	var vuxml VuXML
-	err = xml.Unmarshal(xmlData, &vuxml)
-	if err != nil {
+	// 3. Parse the XML with etree
+	doc := etree.NewDocument()
+	if err := doc.ReadFromBytes(xmlData); err != nil {
 		log.Fatalf("Failed to parse XML: %v", err)
 	}
 
-	// 5. Process vulnerabilities
-	vulnMap := make(map[string]Vuln)
-	for _, vuln := range vuxml.Vulns {
-		if vuln.Cancelled == nil {
-			vulnMap[vuln.Vid] = vuln
+	var vulns []Vuln
+	root := doc.SelectElement("vuxml")
+	for _, vulnElement := range root.SelectElements("vuln") {
+		if vulnElement.SelectElement("cancelled") != nil {
+			continue
 		}
+
+		vid := vulnElement.SelectAttrValue("vid", "")
+		description := ""
+		if descEl := vulnElement.SelectElement("description"); descEl != nil {
+			description = descEl.Text()
+		}
+		topic := ""
+		if topicEl := vulnElement.SelectElement("topic"); topicEl != nil {
+			topic = topicEl.Text()
+		}
+
+		vuln := Vuln{
+			Vid:         vid,
+			Topic:       topic,
+			Description: description,
+		}
+
+		// Dates
+		if datesElement := vulnElement.SelectElement("dates"); datesElement != nil {
+			if discoveryEl := datesElement.SelectElement("discovery"); discoveryEl != nil {
+				vuln.Dates.Discovery = discoveryEl.Text()
+			}
+			if entryEl := datesElement.SelectElement("entry"); entryEl != nil {
+				vuln.Dates.Entry = entryEl.Text()
+			}
+			if modifiedEl := datesElement.SelectElement("modified"); modifiedEl != nil {
+				vuln.Dates.Modified = modifiedEl.Text()
+			}
+		}
+
+		// Affects
+		if affectsElement := vulnElement.SelectElement("affects"); affectsElement != nil {
+			for _, pkgElement := range affectsElement.SelectElements("package") {
+				name := ""
+				if nameEl := pkgElement.SelectElement("name"); nameEl != nil {
+					name = nameEl.Text()
+				}
+				p := struct {
+					Name  string
+					Range []struct{ Lt, Le, Eq, Ge, Gt string }
+				}{
+					Name: name,
+				}
+				for _, rangeElement := range pkgElement.SelectElements("range") {
+					r := struct{ Lt, Le, Eq, Ge, Gt string }{}
+					if ltEl := rangeElement.SelectElement("lt"); ltEl != nil {
+						r.Lt = ltEl.Text()
+					}
+					if leEl := rangeElement.SelectElement("le"); leEl != nil {
+						r.Le = leEl.Text()
+					}
+					if eqEl := rangeElement.SelectElement("eq"); eqEl != nil {
+						r.Eq = eqEl.Text()
+					}
+					if geEl := rangeElement.SelectElement("ge"); geEl != nil {
+						r.Ge = geEl.Text()
+					}
+					if gtEl := rangeElement.SelectElement("gt"); gtEl != nil {
+						r.Gt = gtEl.Text()
+					}
+					p.Range = append(p.Range, r)
+				}
+				vuln.Affects = append(vuln.Affects, p)
+			}
+		}
+
+		// References
+		if referencesElement := vulnElement.SelectElement("references"); referencesElement != nil {
+			for _, refElement := range referencesElement.ChildElements() {
+				r := struct {
+					Source string
+					Value  string
+				}{
+					Source: refElement.Tag,
+					Value:  refElement.Text(),
+				}
+				vuln.References = append(vuln.References, r)
+			}
+		}
+		vulns = append(vulns, vuln)
+	}
+
+	// Handle --latest flag
+	if *latest > 0 {
+		sort.Slice(vulns, func(i, j int) bool {
+			return vulns[i].Dates.Entry > vulns[j].Dates.Entry
+		})
+
+		fmt.Println("Latest Vulnerabilities:")
+		for i := 0; i < *latest && i < len(vulns); i++ {
+			vuln := vulns[i]
+			fmt.Printf("%s  %s\n", vuln.Dates.Entry, vuln.Topic)
+		}
+		os.Exit(0)
+	}
+
+	vulnMap := make(map[string]Vuln)
+	for _, v := range vulns {
+		vulnMap[v.Vid] = v
 	}
 
 	foundCount := 0
@@ -382,7 +409,7 @@ func main() {
 		}
 
 		for _, vuln := range vulnMap {
-			for _, affectedPkg := range vuln.Affects.Packages {
+			for _, affectedPkg := range vuln.Affects {
 				match := false
 				if *reNames {
 					if re, err := regexp.Compile(pkgName); err == nil && re.MatchString(affectedPkg.Name) {
@@ -449,10 +476,9 @@ func main() {
 		if len(parts) > 1 {
 			id = parts[1]
 		}
-
 		for _, vuln := range vulnMap {
-			for _, reference := range vuln.References.Refs {
-				if (source == "" || source == reference.XMLName.Local) && (id == "" || id == reference.Value) {
+			for _, reference := range vuln.References {
+				if (source == "" || source == reference.Source) && (id == "" || id == reference.Value) {
 					if !printedVids[vuln.Vid] {
 						printVuln(vuln, *showDesc)
 						foundCount++
@@ -480,11 +506,11 @@ func main() {
 		}
 		for _, vuln := range vulnMap {
 			if strings.HasPrefix(vuln.Dates.Entry, *entry) {
-					if !printedVids[vuln.Vid] {
-						printVuln(vuln, *showDesc)
-						foundCount++
-						printedVids[vuln.Vid] = true
-					}
+				if !printedVids[vuln.Vid] {
+					printVuln(vuln, *showDesc)
+					foundCount++
+					printedVids[vuln.Vid] = true
+				}
 			}
 		}
 	} else if *modified != "" {
@@ -503,8 +529,8 @@ func main() {
 	} else if *listSources {
 		sources := make(map[string]bool)
 		for _, vuln := range vulnMap {
-			for _, reference := range vuln.References.Refs {
-				sources[reference.XMLName.Local] = true
+			for _, reference := range vuln.References {
+				sources[reference.Source] = true
 			}
 		}
 		fmt.Println("References sources:")
@@ -521,3 +547,4 @@ func main() {
 		}
 	}
 }
+
