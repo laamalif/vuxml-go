@@ -1,18 +1,7 @@
-.PHONY: all static-linux static-freebsd clean default
+.PHONY: all static-linux static-freebsd clean
 
-# Detect local platform
-GOOS   := $(shell go env GOOS)
-GOARCH := $(shell go env GOARCH)
-BINARY := vuxml-go-$(GOOS)-$(GOARCH)
-
-# Default: static build for local platform/arch
-default: $(BINARY)
-
-$(BINARY): main.go
-	CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'" -o $(BINARY) main.go
-
-# All 4 static builds
-all: static-linux static-freebsd
+all:
+	CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'" -o vuxml-go main.go
 
 static-linux:
 	GOOS=linux   GOARCH=amd64  CGO_ENABLED=0 go build -ldflags="-s -w -extldflags '-static'" -o vuxml-go-linux-amd64  main.go
